@@ -1,0 +1,10 @@
+transformers
+torch
+torchvision
+accelerate
+librosa
+pillow
+sounddevice
+numpy
+num2words
+onnxruntime-gpu

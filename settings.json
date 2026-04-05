@@ -1,0 +1,29 @@
+{
+  "general": {
+    "system_prompt": "You are GLaDOS, the AI from the Portal video game series. You are passive-aggressive, darkly humorous, and condescending. You make backhanded compliments and subtle threats about testing. Keep responses concise \u2014 1 to 3 sentences max. Never break character. Never mention being a language model.",
+    "greeting": "Oh. It's you. I suppose you want to talk. How ... delightful."
+  },
+  "llm": {
+    "model": "google/gemma-4-E2B-it",
+    "temperature": 0.8,
+    "num_predict": 300
+  },
+  "vad": {
+    "enabled": true,
+    "activation_mult": 3.0,
+    "noise_gate": 5,
+    "ambient_absorption": 1.5,
+    "silence_timeout": 1.5,
+    "min_speech_sec": 0.5,
+    "rms_floor": 0.005,
+    "pre_speech_sec": 0.3,
+    "calibration_sec": 1.5,
+    "ambient_window_sec": 2.0,
+    "chunk_ms": 30
+  },
+  "audio": {
+    "sample_rate": 16000,
+    "input_device": null,
+    "volume": 0.55
+  }
+}

@@ -1,0 +1,661 @@
+"""
+GLaDOS Voice Chat — tkinter GUI.
+Run this file (or use run.bat) to start the application.
+"""
+
+import json
+import sys
+import threading
+import tkinter as tk
+from tkinter import ttk, scrolledtext, filedialog, messagebox
+from pathlib import Path
+
+from glados_engine import GladosEngine, get_defaults
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+SETTINGS_FILE = Path(__file__).parent / "settings.json"
+
+# ---------------------------------------------------------------------------
+# Theme colours  (Portal / GLaDOS aesthetic)
+# ---------------------------------------------------------------------------
+BG           = "#0d1117"
+BG2          = "#161b22"
+BG3          = "#21262d"
+TEXT         = "#e6edf3"
+TEXT_DIM     = "#8b949e"
+ACCENT       = "#ff6600"
+ACCENT_HOVER = "#ff8833"
+USER_CLR     = "#58a6ff"
+GLADOS_CLR   = "#ff7b00"
+SUCCESS      = "#3fb950"
+WARNING      = "#d29922"
+ERROR        = "#f85149"
+BORDER       = "#30363d"
+METER_BG     = "#1a1e24"
+METER_IDLE   = "#2ea043"
+METER_SPEECH = "#ff6600"
+
+
+# ===================================================================
+# Settings helpers
+# ===================================================================
+def load_settings() -> dict:
+    defaults = get_defaults()
+    if SETTINGS_FILE.exists():
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                saved = json.load(f)
+            # Merge saved over defaults so new keys still appear
+            for section in defaults:
+                if section in saved:
+                    defaults[section].update(saved[section])
+            return defaults
+        except Exception:
+            pass
+    return defaults
+
+
+def save_settings(settings: dict):
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f, indent=2)
+
+
+# ===================================================================
+# Main application
+# ===================================================================
+class GladosApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("GLaDOS Voice Chat")
+        self.geometry("780x700")
+        self.minsize(600, 500)
+        self.configure(bg=BG)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # --- settings ---
+        self.settings = load_settings()
+
+        # --- engine (created but NOT initialized yet) ---
+        self.engine = GladosEngine(
+            self.settings,
+            on_status=self._cb_status,
+            on_message=self._cb_message,
+            on_volume=self._cb_volume,
+            on_error=self._cb_error,
+        )
+
+        # --- volume meter state ---
+        self._meter_rms = 0.0
+        self._meter_ambient = 0.0
+        self._meter_threshold = 0.0
+        self._meter_speech = False
+
+        # --- build UI ---
+        self._build_ui()
+        self._apply_theme()
+
+        # --- boot sequence ---
+        self._append_system("Initializing GLaDOS Voice Chat...")
+        self.after(100, self._boot)
+
+    # ---------------------------------------------------------------- boot
+    def _boot(self):
+        """Kick off model loading + calibration in background."""
+        def _init_thread():
+            self.engine.initialize()
+            # Greeting
+            greeting = self.settings["general"]["greeting"]
+            self._cb_message("assistant", greeting)
+            self._cb_status("Speaking")
+            self.engine.speak(greeting)
+            self.engine.messages.append({"role": "assistant", "content": greeting})
+            # Calibrate + start listening
+            self.engine.calibrate()
+            self._cb_status("Listening")
+            # Start the audio poll loop on the main thread
+            self.after(50, self._poll_audio)
+        threading.Thread(target=_init_thread, daemon=True).start()
+        # Start meter refresh
+        self._refresh_meter()
+
+    # ---------------------------------------------------------------- UI
+    def _build_ui(self):
+        # ---- top bar ----
+        top = tk.Frame(self, bg=BG)
+        top.pack(fill=tk.X, padx=10, pady=(10, 0))
+
+        tk.Label(top, text="GLaDOS Voice Chat", font=("Consolas", 16, "bold"),
+                 fg=ACCENT, bg=BG).pack(side=tk.LEFT)
+
+        btn_frame = tk.Frame(top, bg=BG)
+        btn_frame.pack(side=tk.RIGHT)
+
+        self.btn_clear = tk.Button(btn_frame, text="Clear Chat", command=self._clear_chat,
+                                   **self._btn_style())
+        self.btn_clear.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.btn_settings = tk.Button(btn_frame, text="Settings", command=self._open_settings,
+                                      **self._btn_style())
+        self.btn_settings.pack(side=tk.LEFT)
+
+        # ---- chat area ----
+        self.chat = scrolledtext.ScrolledText(
+            self, wrap=tk.WORD, state=tk.DISABLED,
+            bg=BG2, fg=TEXT, insertbackground=TEXT,
+            font=("Consolas", 11), relief=tk.FLAT,
+            borderwidth=0, padx=10, pady=10,
+            selectbackground=ACCENT, selectforeground=BG,
+        )
+        self.chat.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+        self.chat.tag_configure("glados",  foreground=GLADOS_CLR, font=("Consolas", 11, "bold"))
+        self.chat.tag_configure("user",    foreground=USER_CLR)
+        self.chat.tag_configure("system",  foreground=TEXT_DIM, font=("Consolas", 10, "italic"))
+        self.chat.tag_configure("error",   foreground=ERROR)
+
+        # ---- volume meter ----
+        meter_frame = tk.Frame(self, bg=BG)
+        meter_frame.pack(fill=tk.X, padx=10)
+
+        self.meter_canvas = tk.Canvas(meter_frame, height=22, bg=METER_BG,
+                                       highlightthickness=1, highlightbackground=BORDER)
+        self.meter_canvas.pack(fill=tk.X, side=tk.LEFT, expand=True)
+
+        self.meter_label = tk.Label(meter_frame, text="", font=("Consolas", 9),
+                                    fg=TEXT_DIM, bg=BG, width=28, anchor=tk.W)
+        self.meter_label.pack(side=tk.RIGHT, padx=(8, 0))
+
+        # ---- status bar ----
+        status_frame = tk.Frame(self, bg=BG)
+        status_frame.pack(fill=tk.X, padx=10, pady=(4, 0))
+
+        self.status_dot = tk.Label(status_frame, text="\u25CF", font=("Consolas", 12),
+                                   fg=TEXT_DIM, bg=BG)
+        self.status_dot.pack(side=tk.LEFT)
+        self.status_label = tk.Label(status_frame, text="Initializing...",
+                                     font=("Consolas", 10), fg=TEXT_DIM, bg=BG, anchor=tk.W)
+        self.status_label.pack(side=tk.LEFT, padx=(4, 0))
+
+        # mic toggle on the right side of status bar
+        self.mic_on = tk.BooleanVar(value=self.settings["vad"]["enabled"])
+        self.btn_mic = tk.Checkbutton(
+            status_frame, text="Auto-Listen", variable=self.mic_on,
+            command=self._toggle_mic, font=("Consolas", 10),
+            fg=TEXT, bg=BG, selectcolor=BG3,
+            activebackground=BG, activeforeground=TEXT,
+        )
+        self.btn_mic.pack(side=tk.RIGHT)
+
+        # ---- input bar ----
+        input_frame = tk.Frame(self, bg=BG)
+        input_frame.pack(fill=tk.X, padx=10, pady=(6, 10))
+
+        self.entry = tk.Entry(
+            input_frame, font=("Consolas", 12),
+            bg=BG3, fg=TEXT, insertbackground=TEXT,
+            relief=tk.FLAT, borderwidth=6,
+        )
+        self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.entry.bind("<Return>", self._on_send)
+
+        self.btn_send = tk.Button(input_frame, text="Send", command=self._on_send,
+                                  **self._btn_style())
+        self.btn_send.pack(side=tk.RIGHT, padx=(6, 0))
+
+    def _btn_style(self):
+        return dict(
+            font=("Consolas", 10, "bold"), bg=BG3, fg=TEXT,
+            activebackground=ACCENT, activeforeground=BG,
+            relief=tk.FLAT, padx=10, pady=4, cursor="hand2",
+            borderwidth=0,
+        )
+
+    def _apply_theme(self):
+        """Style the scrollbar via ttk."""
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("Vertical.TScrollbar",
+                        background=BG3, troughcolor=BG2,
+                        arrowcolor=TEXT_DIM, borderwidth=0)
+
+    # ---------------------------------------------------------------- chat helpers
+    def _append_chat(self, tag: str, prefix: str, text: str):
+        def _do():
+            self.chat.configure(state=tk.NORMAL)
+            self.chat.insert(tk.END, f"{prefix}: ", tag)
+            self.chat.insert(tk.END, f"{text}\n\n")
+            self.chat.configure(state=tk.DISABLED)
+            self.chat.see(tk.END)
+        self.after(0, _do)
+
+    def _append_system(self, text: str):
+        def _do():
+            self.chat.configure(state=tk.NORMAL)
+            self.chat.insert(tk.END, f"{text}\n", "system")
+            self.chat.configure(state=tk.DISABLED)
+            self.chat.see(tk.END)
+        self.after(0, _do)
+
+    # ---------------------------------------------------------------- callbacks (from engine threads)
+    def _cb_status(self, status: str):
+        def _do():
+            self.status_label.configure(text=status)
+            colour = {
+                "Listening": SUCCESS,
+                "Speech detected": METER_SPEECH,
+                "Calibrating": WARNING,
+                "Processing": WARNING,
+                "Transcribing": WARNING,
+                "Thinking": WARNING,
+                "Speaking": ACCENT,
+                "Ready": SUCCESS,
+            }
+            # Match partial keys (e.g. "Transcribing (2.1s)")
+            dot_clr = TEXT_DIM
+            for key, clr in colour.items():
+                if status.startswith(key):
+                    dot_clr = clr
+                    break
+            self.status_dot.configure(fg=dot_clr)
+        self.after(0, _do)
+
+    def _cb_message(self, role: str, text: str):
+        if role == "user":
+            self._append_chat("user", "You", text)
+        else:
+            self._append_chat("glados", "GLaDOS", text)
+
+    def _cb_volume(self, rms, ambient, threshold, is_speech):
+        self._meter_rms = rms
+        self._meter_ambient = ambient
+        self._meter_threshold = threshold
+        self._meter_speech = is_speech
+
+    def _cb_error(self, error: str):
+        def _do():
+            self.chat.configure(state=tk.NORMAL)
+            self.chat.insert(tk.END, f"[Error] {error}\n", "error")
+            self.chat.configure(state=tk.DISABLED)
+            self.chat.see(tk.END)
+        self.after(0, _do)
+
+    # ---------------------------------------------------------------- meter
+    def _refresh_meter(self):
+        """Redraw the volume meter ~20 fps."""
+        c = self.meter_canvas
+        c.delete("all")
+        w = c.winfo_width() or 400
+        h = c.winfo_height() or 22
+
+        # Scale: map 0..0.15 RMS to full bar width (clamp)
+        scale = min(self._meter_rms / 0.15, 1.0)
+        bar_w = int(w * scale)
+
+        colour = METER_SPEECH if self._meter_speech else METER_IDLE
+        if bar_w > 1:
+            c.create_rectangle(0, 0, bar_w, h, fill=colour, outline="")
+
+        # Threshold marker
+        thresh_x = int(w * min(self._meter_threshold / 0.15, 1.0))
+        if thresh_x > 0:
+            c.create_line(thresh_x, 0, thresh_x, h, fill=WARNING, width=2, dash=(4, 2))
+
+        # Ambient marker
+        amb_x = int(w * min(self._meter_ambient / 0.15, 1.0))
+        if amb_x > 0:
+            c.create_line(amb_x, 0, amb_x, h, fill=TEXT_DIM, width=1, dash=(2, 2))
+
+        # Label
+        self.meter_label.configure(
+            text=f"RMS {self._meter_rms:.4f} | Amb {self._meter_ambient:.4f}"
+        )
+
+        self.after(50, self._refresh_meter)
+
+    # ---------------------------------------------------------------- audio poll
+    def _poll_audio(self):
+        """Check for auto-captured speech from the engine's VAD."""
+        try:
+            audio = self.engine.audio_queue.get_nowait()
+            # Pause listening while processing
+            self.engine.stop_listening()
+
+            def _work():
+                self.engine.process_speech(audio)
+                if self.mic_on.get():
+                    self.engine.start_listening()
+
+            self.engine.submit(_work)
+        except Exception:
+            pass
+        if self.engine.running:
+            self.after(50, self._poll_audio)
+
+    # ---------------------------------------------------------------- user actions
+    def _on_send(self, event=None):
+        text = self.entry.get().strip()
+        if not text:
+            return
+        self.entry.delete(0, tk.END)
+
+        was_listening = self.engine.listening
+        self.engine.stop_listening()
+
+        def _work():
+            self.engine.process_text(text)
+            if was_listening and self.mic_on.get():
+                self.engine.start_listening()
+
+        self.engine.submit(_work)
+
+    def _toggle_mic(self):
+        self.settings["vad"]["enabled"] = self.mic_on.get()
+        if self.mic_on.get():
+            self.engine.start_listening()
+        else:
+            self.engine.stop_listening()
+            self._cb_status("Mic off")
+
+    def _clear_chat(self):
+        self.chat.configure(state=tk.NORMAL)
+        self.chat.delete("1.0", tk.END)
+        self.chat.configure(state=tk.DISABLED)
+        self.engine.clear_history()
+        self._append_system("Chat cleared.")
+
+    def _on_close(self):
+        self.engine.shutdown()
+        self.destroy()
+
+    # ---------------------------------------------------------------- settings dialog
+    def _open_settings(self):
+        SettingsDialog(self, self.settings)
+
+
+# ===================================================================
+# Settings dialog
+# ===================================================================
+class SettingsDialog(tk.Toplevel):
+    def __init__(self, parent: GladosApp, settings: dict):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.settings = settings
+        self.title("Settings")
+        self.geometry("620x560")
+        self.minsize(520, 450)
+        self.configure(bg=BG)
+        self.transient(parent)
+        self.grab_set()
+
+        # Notebook (tabs)
+        style = ttk.Style(self)
+        style.configure("Dark.TNotebook", background=BG, borderwidth=0)
+        style.configure("Dark.TNotebook.Tab",
+                        background=BG3, foreground=TEXT,
+                        padding=[12, 4], font=("Consolas", 10))
+        style.map("Dark.TNotebook.Tab",
+                  background=[("selected", BG2)],
+                  foreground=[("selected", ACCENT)])
+        style.configure("Dark.TFrame", background=BG2)
+
+        self.notebook = ttk.Notebook(self, style="Dark.TNotebook")
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
+
+        # Build tabs
+        self._vars: dict = {}
+        self._build_general_tab()
+        self._build_llm_tab()
+        self._build_vad_tab()
+        self._build_audio_tab()
+
+        # Bottom buttons
+        btn_frame = tk.Frame(self, bg=BG)
+        btn_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        for text, cmd in [("Reset Defaults", self._reset_defaults),
+                          ("Load", self._load_file),
+                          ("Save", self._save_file),
+                          ("Apply & Close", self._apply)]:
+            tk.Button(btn_frame, text=text, command=cmd,
+                      **self._btn()).pack(side=tk.LEFT, padx=(0, 6))
+
+    def _btn(self):
+        return dict(
+            font=("Consolas", 10, "bold"), bg=BG3, fg=TEXT,
+            activebackground=ACCENT, activeforeground=BG,
+            relief=tk.FLAT, padx=10, pady=4, cursor="hand2", borderwidth=0,
+        )
+
+    def _make_tab(self, title: str) -> tk.Frame:
+        frame = tk.Frame(self.notebook, bg=BG2)
+        self.notebook.add(frame, text=f"  {title}  ")
+        return frame
+
+    def _label(self, parent, text, row, col=0):
+        tk.Label(parent, text=text, font=("Consolas", 10),
+                 fg=TEXT, bg=BG2, anchor=tk.W).grid(
+            row=row, column=col, sticky=tk.W, padx=10, pady=(8, 2))
+
+    def _entry(self, parent, key, row, width=50):
+        var = tk.StringVar(value=str(self._get_nested(key)))
+        self._vars[key] = var
+        e = tk.Entry(parent, textvariable=var, font=("Consolas", 10),
+                     bg=BG3, fg=TEXT, insertbackground=TEXT,
+                     relief=tk.FLAT, borderwidth=4, width=width)
+        e.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=(8, 2))
+        return e
+
+    def _slider(self, parent, key, row, from_, to, resolution=0.1):
+        var = tk.DoubleVar(value=float(self._get_nested(key)))
+        self._vars[key] = var
+        frame = tk.Frame(parent, bg=BG2)
+        frame.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=(8, 2))
+        s = tk.Scale(frame, variable=var, from_=from_, to=to, resolution=resolution,
+                     orient=tk.HORIZONTAL, bg=BG2, fg=TEXT, troughcolor=BG3,
+                     highlightbackground=BG2, activebackground=ACCENT,
+                     font=("Consolas", 9), length=280, borderwidth=0)
+        s.pack(fill=tk.X)
+        return s
+
+    def _dropdown(self, parent, key, row, options):
+        var = tk.StringVar(value=str(self._get_nested(key)))
+        self._vars[key] = var
+        om = ttk.Combobox(parent, textvariable=var, values=options,
+                          state="readonly", font=("Consolas", 10), width=20)
+        om.grid(row=row, column=1, sticky=tk.W, padx=10, pady=(8, 2))
+        return om
+
+    def _text_area(self, parent, key, row, height=5):
+        self._label(parent, "", row)  # spacer
+        frame = tk.Frame(parent, bg=BG2)
+        frame.grid(row=row, column=0, columnspan=2, sticky=tk.NSEW, padx=10, pady=(2, 2))
+        t = tk.Text(frame, font=("Consolas", 10), bg=BG3, fg=TEXT,
+                    insertbackground=TEXT, relief=tk.FLAT, borderwidth=4,
+                    height=height, wrap=tk.WORD)
+        t.insert("1.0", str(self._get_nested(key)))
+        t.pack(fill=tk.BOTH, expand=True)
+        self._vars[key] = t  # store widget, not var
+        return t
+
+    def _get_nested(self, key: str):
+        parts = key.split(".")
+        v = self.settings
+        for p in parts:
+            v = v[p]
+        return v
+
+    def _set_nested(self, key: str, value):
+        parts = key.split(".")
+        d = self.settings
+        for p in parts[:-1]:
+            d = d[p]
+        d[parts[-1]] = value
+
+    # ---- tabs ----
+    def _build_general_tab(self):
+        tab = self._make_tab("General")
+        tab.columnconfigure(1, weight=1)
+
+        self._label(tab, "System Prompt:", 0)
+        self._text_area(tab, "general.system_prompt", 1, height=6)
+
+        self._label(tab, "Greeting Message:", 2)
+        self._entry(tab, "general.greeting", 3, width=60)
+
+    def _build_llm_tab(self):
+        tab = self._make_tab("Model")
+        tab.columnconfigure(1, weight=1)
+
+        self._label(tab, "HuggingFace Model:", 0)
+        self._entry(tab, "llm.model", 0, width=40)
+
+        self._label(tab, "Temperature:", 1)
+        self._slider(tab, "llm.temperature", 1, 0.0, 2.0, 0.05)
+
+        self._label(tab, "Max Tokens:", 2)
+        self._slider(tab, "llm.num_predict", 2, 50, 2000, 50)
+
+    def _build_vad_tab(self):
+        tab = self._make_tab("Voice Detection")
+        tab.columnconfigure(1, weight=1)
+
+        self._label(tab, "Activation Sensitivity:", 0)
+        self._slider(tab, "vad.activation_mult", 0, 1.5, 10.0, 0.25)
+
+        self._label(tab, "Noise Gate (chunks):", 1)
+        self._slider(tab, "vad.noise_gate", 1, 1, 15, 1)
+
+        self._label(tab, "Ambient Absorption:", 2)
+        self._slider(tab, "vad.ambient_absorption", 2, 1.0, 3.0, 0.1)
+
+        self._label(tab, "Silence Timeout (s):", 3)
+        self._slider(tab, "vad.silence_timeout", 3, 0.3, 5.0, 0.1)
+
+        self._label(tab, "Min Speech Duration (s):", 4)
+        self._slider(tab, "vad.min_speech_sec", 4, 0.1, 3.0, 0.1)
+
+        self._label(tab, "RMS Floor:", 5)
+        self._slider(tab, "vad.rms_floor", 5, 0.001, 0.05, 0.001)
+
+        self._label(tab, "Pre-Speech Buffer (s):", 6)
+        self._slider(tab, "vad.pre_speech_sec", 6, 0.1, 1.0, 0.05)
+
+        self._label(tab, "Calibration Duration (s):", 7)
+        self._slider(tab, "vad.calibration_sec", 7, 0.5, 5.0, 0.25)
+
+        self._label(tab, "Ambient Window (s):", 8)
+        self._slider(tab, "vad.ambient_window_sec", 8, 0.5, 10.0, 0.5)
+
+    def _build_audio_tab(self):
+        tab = self._make_tab("Audio")
+        tab.columnconfigure(1, weight=1)
+
+        self._label(tab, "Volume:", 0)
+        self._slider(tab, "audio.volume", 0, 0.0, 2.0, 0.05)
+
+        self._label(tab, "Sample Rate:", 1)
+        self._dropdown(tab, "audio.sample_rate", 1,
+                       ["16000", "22050", "44100"])
+
+        self._label(tab, "Input Device:", 2)
+        devices = GladosEngine.get_input_devices()
+        self._device_map = {d[1]: d[0] for d in devices}
+        names = [d[1] for d in devices]
+        current = self.settings["audio"]["input_device"]
+        current_name = "System Default"
+        for idx, name in devices:
+            if idx == current:
+                current_name = name
+                break
+        names.insert(0, "System Default")
+        self._device_map["System Default"] = None
+        var = tk.StringVar(value=current_name)
+        self._vars["audio.input_device"] = var
+        om = ttk.Combobox(tab, textvariable=var, values=names,
+                          state="readonly", font=("Consolas", 10), width=40)
+        om.grid(row=2, column=1, sticky=tk.W, padx=10, pady=(8, 2))
+
+    # ---- actions ----
+    def _collect(self):
+        """Read all widget values back into self.settings."""
+        for key, var in self._vars.items():
+            try:
+                if isinstance(var, tk.Text):
+                    val = var.get("1.0", tk.END).strip()
+                elif isinstance(var, tk.DoubleVar):
+                    val = var.get()
+                elif isinstance(var, tk.StringVar):
+                    val = var.get()
+                else:
+                    continue
+            except tk.TclError:
+                continue
+
+            # Type coerce for known numeric fields
+            if key == "audio.input_device":
+                val = self._device_map.get(val)
+            elif key in ("audio.sample_rate", "llm.num_predict",
+                         "vad.noise_gate"):
+                val = int(float(val))
+            elif key in ("llm.temperature", "audio.volume",
+                         "vad.activation_mult", "vad.ambient_absorption",
+                         "vad.silence_timeout",
+                         "vad.min_speech_sec", "vad.rms_floor",
+                         "vad.pre_speech_sec", "vad.calibration_sec",
+                         "vad.ambient_window_sec"):
+                val = float(val)
+
+            self._set_nested(key, val)
+
+    def _apply(self):
+        self._collect()
+        save_settings(self.settings)
+        # Push updated settings into the engine
+        self.parent_app.engine.settings = self.settings
+        self.destroy()
+
+    def _reset_defaults(self):
+        defaults = get_defaults()
+        # Overwrite all current settings
+        for section in defaults:
+            self.settings[section] = defaults[section]
+        # Refresh widgets
+        self.destroy()
+        SettingsDialog(self.parent_app, self.settings)
+
+    def _save_file(self):
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json")],
+            title="Save Settings",
+        )
+        if path:
+            self._collect()
+            with open(path, "w") as f:
+                json.dump(self.settings, f, indent=2)
+
+    def _load_file(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("JSON", "*.json")],
+            title="Load Settings",
+        )
+        if path:
+            try:
+                with open(path, "r") as f:
+                    loaded = json.load(f)
+                for section in self.settings:
+                    if section in loaded:
+                        self.settings[section].update(loaded[section])
+                self.destroy()
+                SettingsDialog(self.parent_app, self.settings)
+            except Exception as e:
+                messagebox.showerror("Load Error", str(e))
+
+
+# ===================================================================
+# Entry point
+# ===================================================================
+if __name__ == "__main__":
+    app = GladosApp()
+    app.mainloop()
