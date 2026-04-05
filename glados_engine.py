@@ -139,6 +139,9 @@ class GladosEngine:
         # Prevent overlapping TTS playback
         self._speak_lock = threading.Lock()
 
+        # Prevent overlapping model loads
+        self._init_lock = threading.Lock()
+
         # Worker thread for blocking operations
         self._worker_queue: queue.Queue = queue.Queue()
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
@@ -174,38 +177,40 @@ class GladosEngine:
         import torch
         from transformers import AutoProcessor, AutoModelForMultimodalLM
 
-        log.info("Initializing engine...")
-        model_id = self.settings["llm"]["model"]
+        with self._init_lock:
+            log.info("Initializing engine...")
+            model_id = self.settings["llm"]["model"]
 
-        self.on_status(f"Loading {model_id}...")
-        log.info("Loading model %s", model_id)
-        try:
-            self.processor = AutoProcessor.from_pretrained(model_id, local_files_only=True)
-            self.model = AutoModelForMultimodalLM.from_pretrained(
-                model_id,
-                dtype="auto",
-                device_map="auto",
-                local_files_only=True,
-            )
-            # Clear invalid generation defaults so generate() doesn't warn
-            self.model.generation_config.top_p = None
-            self.model.generation_config.top_k = None
-            log.info("Model loaded on %s", self.model.device)
-        except Exception as e:
-            log.error("Model load failed: %s", e)
-            self.on_error(f"Model load failed: {e}")
-            return
+            self.on_status(f"Loading {model_id}...")
+            log.info("Loading model %s", model_id)
+            try:
+                self.processor = AutoProcessor.from_pretrained(model_id, local_files_only=True)
+                self.model = AutoModelForMultimodalLM.from_pretrained(
+                    model_id,
+                    dtype="auto",
+                    device_map="auto",
+                    local_files_only=True,
+                )
+                # Clear invalid generation defaults so generate() doesn't warn
+                self.model.generation_config.top_p = None
+                self.model.generation_config.top_k = None
+                log.info("Model loaded on %s", self.model.device)
+            except Exception as e:
+                log.error("Model load failed: %s", e)
+                self.on_error(f"Model load failed: {e}")
+                return
 
-        self.on_status("Loading GLaDOS TTS model...")
-        try:
-            self.tts = glados.TTS()
-        except Exception as e:
-            self.on_error(f"TTS load failed: {e}")
-            return
+            self.on_status("Loading GLaDOS TTS model...")
+            try:
+                if self.tts is None:
+                    self.tts = glados.TTS()
+            except Exception as e:
+                self.on_error(f"TTS load failed: {e}")
+                return
 
-        self.messages = [
-            {"role": "system", "content": self.settings["general"]["system_prompt"]}
-        ]
+            self.messages = [
+                {"role": "system", "content": self.settings["general"]["system_prompt"]}
+            ]
         self.on_status("Ready")
 
     # --------------------------------------------------------------- cleanup

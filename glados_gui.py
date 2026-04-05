@@ -457,16 +457,25 @@ class GladosApp(tk.Tk):
     # ---------------------------------------------------------------- boot
     def _boot(self):
         """Kick off model loading + calibration in background."""
+        self._model_switching = False
+        self._poll_active = True
+
         def _init_thread():
             self.engine.initialize()
+            if self._model_switching:
+                return
             # Greeting
             greeting = self.settings["general"]["greeting"]
             self._cb_message("assistant", greeting)
             self._cb_status("Speaking")
             self.engine.speak(greeting)
+            if self._model_switching:
+                return
             self.engine.messages.append({"role": "assistant", "content": greeting})
             # Calibrate + start listening
             self.engine.calibrate()
+            if self._model_switching:
+                return
             self._cb_status("Listening")
             # Start the audio poll loop on the main thread
             self.after(50, self._poll_audio)
@@ -541,6 +550,15 @@ class GladosApp(tk.Tk):
         )
         self.btn_mic.pack(side=tk.RIGHT)
 
+        self.btn_skip = tk.Button(
+            status_frame, text="Skip Voice Response", command=self._skip_speech,
+            font=("Consolas", 9, "bold"), bg=BG3, fg=TEXT_DIM,
+            activebackground=BG2, activeforeground=TEXT,
+            relief=tk.FLAT, padx=6, pady=1, cursor="hand2", borderwidth=0,
+            state=tk.DISABLED,
+        )
+        self.btn_skip.pack(side=tk.RIGHT, padx=(0, 6))
+
         # ---- input bar ----
         input_frame = tk.Frame(self, bg=BG)
         input_frame.pack(fill=tk.X, padx=10, pady=(6, 10))
@@ -593,8 +611,14 @@ class GladosApp(tk.Tk):
 
     # ---------------------------------------------------------------- callbacks (from engine threads)
     def _cb_status(self, status: str):
+        self._current_status = status
         def _do():
             self.status_label.configure(text=status)
+            # Enable skip button only while speaking
+            if status == "Speaking":
+                self.btn_skip.configure(state=tk.NORMAL, fg=TEXT)
+            else:
+                self.btn_skip.configure(state=tk.DISABLED, fg=TEXT_DIM)
             colour = {
                 "Listening": SUCCESS,
                 "Speech detected": METER_SPEECH,
@@ -683,7 +707,7 @@ class GladosApp(tk.Tk):
             self.engine.submit(_work)
         except Exception:
             pass
-        if self.engine.running:
+        if self._poll_active:
             self.after(50, self._poll_audio)
 
     # ---------------------------------------------------------------- user actions
@@ -710,6 +734,12 @@ class GladosApp(tk.Tk):
         else:
             self.engine.stop_listening()
             self._cb_status("Mic off")
+
+    def _skip_speech(self):
+        """Stop TTS playback and return to listening."""
+        if getattr(self, '_current_status', '') != "Speaking":
+            return
+        self.engine.stop_speaking()
 
     def _clear_chat(self):
         self.chat.configure(state=tk.NORMAL)
@@ -965,7 +995,7 @@ class SettingsDialog(tk.Toplevel):
 
                 self.after(0, lambda: self._model_progress.configure(value=100))
                 self.after(0, lambda: self._model_status.configure(
-                    text=f"{model_id} downloaded successfully. Restart to use it.", fg=SUCCESS))
+                    text=f"{model_id} downloaded. Click Apply to switch.", fg=SUCCESS))
                 self.after(0, lambda: self._model_dl_btn.configure(state=tk.NORMAL, text="Download"))
 
             except Exception as e:
@@ -1067,11 +1097,47 @@ class SettingsDialog(tk.Toplevel):
             self._set_nested(key, val)
 
     def _apply(self):
+        old_model = self.settings["llm"]["model"]
         self._collect()
         save_settings(self.settings)
         # Push updated settings into the engine
         self.parent_app.engine.settings = self.settings
+        new_model = self.settings["llm"]["model"]
         self.destroy()
+
+        # If the model changed and the new one is cached, hot-swap it
+        if new_model != old_model and _is_model_cached(new_model):
+            app = self.parent_app
+            # Signal boot thread to abort, stop audio poll loop
+            app._model_switching = True
+            app._poll_active = False
+            app.engine.stop_speaking()
+            app.engine.stop_listening()
+            app._cb_status(f"Switching to {new_model}...")
+
+            def _reload():
+                import gc, torch
+                # Wait for any in-progress initialize() to finish
+                with app.engine._init_lock:
+                    app.engine._unload_model()
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                app._model_switching = False
+                app.engine.initialize()
+                app.engine.clear_history()
+                greeting = app.settings["general"]["greeting"]
+                app._cb_message("assistant", greeting)
+                app._cb_status("Speaking")
+                app.engine.speak(greeting)
+                app.engine.messages.append({"role": "assistant", "content": greeting})
+                app.engine.calibrate()
+                app._cb_status("Listening")
+                # Restart the poll loop
+                app._poll_active = True
+                app.after(50, app._poll_audio)
+
+            threading.Thread(target=_reload, daemon=True).start()
 
     def _reset_defaults(self):
         defaults = get_defaults()
