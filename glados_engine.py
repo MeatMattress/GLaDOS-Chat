@@ -481,6 +481,12 @@ class GladosEngine:
         clean = re.sub(r'\ba\b', 'uh', clean)
         clean = re.sub(r"[^a-zA-Z0-9\s.,!?'\-:;\"\(\)]", "", clean)
         log.debug("TTS input: %r", clean)
+
+        # Mute the mic while speaking so VAD doesn't capture TTS output
+        was_listening = self.listening
+        if was_listening:
+            self.stop_listening()
+
         try:
             audio = self.tts.generate_speech_audio(clean)
             volume = self.settings["audio"].get("volume", 1.0)
@@ -491,6 +497,9 @@ class GladosEngine:
         except Exception as e:
             log.error("TTS error: %s", e)
             self.on_error(f"TTS error: {e}")
+        finally:
+            if was_listening:
+                self.start_listening()
 
     def stop_speaking(self):
         sd.stop()
