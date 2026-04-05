@@ -868,19 +868,111 @@ class SettingsDialog(tk.Toplevel):
             model_options.append(current_model)
         var = tk.StringVar(value=current_model)
         self._vars["llm.model"] = var
-        om = ttk.Combobox(tab, textvariable=var, values=model_options,
-                          state="readonly", font=("Consolas", 10), width=35)
-        om.grid(row=0, column=1, sticky=tk.W, padx=10, pady=(8, 2))
 
-        tk.Label(tab, text="Changing models requires a restart to take effect.",
-                 font=("Consolas", 8), fg=TEXT_DIM, bg=BG2
-                 ).grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=20, pady=(0, 4))
+        # Row 0: dropdown + download button
+        model_row = tk.Frame(tab, bg=BG2)
+        model_row.grid(row=0, column=1, sticky=tk.EW, padx=10, pady=(8, 2))
 
-        self._label(tab, "Temperature:", 2)
-        self._slider(tab, "llm.temperature", 2, 0.0, 2.0, 0.05)
+        self._model_combo = ttk.Combobox(model_row, textvariable=var, values=model_options,
+                                         state="readonly", font=("Consolas", 10), width=30)
+        self._model_combo.pack(side=tk.LEFT)
 
-        self._label(tab, "Max Tokens:", 3)
-        self._slider(tab, "llm.num_predict", 3, 50, 2000, 50)
+        self._model_dl_btn = tk.Button(
+            model_row, text="Download", command=self._download_selected_model,
+            font=("Consolas", 9, "bold"), bg=ACCENT, fg=BG,
+            activebackground=ACCENT_HOVER, activeforeground=BG,
+            relief=tk.FLAT, padx=8, pady=2, cursor="hand2", borderwidth=0,
+        )
+        self._model_dl_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        # Row 1: progress bar (hidden until download starts)
+        self._model_progress = ttk.Progressbar(
+            tab, mode="determinate", maximum=100, length=400,
+        )
+        self._model_progress.grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=20, pady=(2, 0))
+        self._model_progress.grid_remove()  # hidden by default
+
+        # Row 2: status label
+        self._model_status = tk.Label(tab, text="", font=("Consolas", 8),
+                                      fg=TEXT_DIM, bg=BG2, anchor=tk.W)
+        self._model_status.grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=20, pady=(0, 4))
+
+        self._label(tab, "Temperature:", 3)
+        self._slider(tab, "llm.temperature", 3, 0.0, 2.0, 0.05)
+
+        self._label(tab, "Max Tokens:", 4)
+        self._slider(tab, "llm.num_predict", 4, 50, 2000, 50)
+
+    def _download_selected_model(self):
+        """Download the model currently selected in the dropdown."""
+        model_id = self._vars["llm.model"].get()
+
+        # Check if already cached
+        if _is_model_cached(model_id):
+            self._model_status.configure(text=f"{model_id} is already downloaded.", fg=SUCCESS)
+            return
+
+        self._model_dl_btn.configure(state=tk.DISABLED, text="Downloading...")
+        self._model_progress.grid()  # show progress bar
+        self._model_status.configure(text="Starting download...", fg=TEXT_DIM)
+
+        def _thread():
+            try:
+                from huggingface_hub import HfApi, snapshot_download
+                try:
+                    from huggingface_hub.constants import HF_HUB_CACHE
+                except ImportError:
+                    HF_HUB_CACHE = str(Path.home() / ".cache" / "huggingface" / "hub")
+
+                self.after(0, lambda: self._model_status.configure(text="Fetching model info..."))
+                api = HfApi()
+                info = api.model_info(model_id)
+                total_size = sum(s.size for s in info.siblings if s.size) or 1
+                total_mb = total_size / (1024 * 1024)
+
+                cache_dir = Path(HF_HUB_CACHE) / f"models--{model_id.replace('/', '--')}"
+
+                def get_cache_size():
+                    try:
+                        return sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file())
+                    except Exception:
+                        return 0
+
+                initial_size = get_cache_size()
+                done = threading.Event()
+                dl_error = [None]
+
+                def _do_download():
+                    try:
+                        snapshot_download(model_id)
+                    except Exception as e:
+                        dl_error[0] = e
+                    done.set()
+
+                threading.Thread(target=_do_download, daemon=True).start()
+
+                while not done.is_set():
+                    current = max(get_cache_size() - initial_size, 0)
+                    pct = min(current / total_size * 100, 99)
+                    mb = current / (1024 * 1024)
+                    self.after(0, lambda p=pct: self._model_progress.configure(value=p))
+                    self.after(0, lambda: self._model_status.configure(
+                        text=f"Downloading... {mb:,.0f} / {total_mb:,.0f} MB"))
+                    done.wait(0.5)
+
+                if dl_error[0]:
+                    raise dl_error[0]
+
+                self.after(0, lambda: self._model_progress.configure(value=100))
+                self.after(0, lambda: self._model_status.configure(
+                    text=f"{model_id} downloaded successfully. Restart to use it.", fg=SUCCESS))
+                self.after(0, lambda: self._model_dl_btn.configure(state=tk.NORMAL, text="Download"))
+
+            except Exception as e:
+                self.after(0, lambda: self._model_status.configure(text=f"Error: {e}", fg=ERROR))
+                self.after(0, lambda: self._model_dl_btn.configure(state=tk.NORMAL, text="Retry"))
+
+        threading.Thread(target=_thread, daemon=True).start()
 
     def _build_vad_tab(self):
         tab = self._make_tab("Voice Detection")
