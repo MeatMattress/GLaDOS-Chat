@@ -397,6 +397,18 @@ class GladosEngine:
                 outputs = self.model.generate(**inputs, max_new_tokens=200, do_sample=False)
 
             text = self.processor.decode(outputs[0][input_len:], skip_special_tokens=True).strip()
+            log.info("Raw transcription: %r", text)
+
+            # Strip prompt echo — Gemma 4 occasionally includes the instruction in its output
+            prompt_text = "Transcribe exactly what the user said in English. Output only the transcription, nothing else."
+            text = text.replace(prompt_text, "").strip()
+            # Also catch partial echoes
+            for fragment in ("Transcribe exactly what the user said",
+                             "Output only the transcription"):
+                text = text.replace(fragment, "").strip()
+            # Clean up leftover punctuation from stripping
+            text = text.strip(".,;: ")
+
             log.info("Transcription result: %r", text)
             return text
         except Exception as e:
@@ -493,8 +505,9 @@ class GladosEngine:
         if not text or text.startswith("[") or self.tts is None:
             return
         clean = text.replace("...", ",").replace(";", ",")
+        clean = clean.replace('"', '').replace('"', '').replace('"', '')
         clean = re.sub(r'\ba\b', 'uh', clean)
-        clean = re.sub(r"[^a-zA-Z0-9\s.,!?'\-:;\"\(\)]", "", clean)
+        clean = re.sub(r"[^a-zA-Z0-9\s.,!?'\-:;()]", "", clean)
         log.debug("TTS input: %r", clean)
 
         with self._speak_lock:
@@ -509,13 +522,19 @@ class GladosEngine:
                 if volume != 1.0:
                     audio = audio * volume
                 sd.play(audio, self.tts.rate)
-                sd.wait()
+                try:
+                    sd.wait()
+                except sd.CallbackAbort:
+                    log.debug("TTS playback skipped")
             except Exception as e:
                 log.error("TTS error: %s", e)
                 self.on_error(f"TTS error: {e}")
 
     def stop_speaking(self):
-        sd.stop()
+        try:
+            sd.stop()
+        except Exception:
+            pass
 
     # --------------------------------------------------------------- worker
     def _worker_loop(self):
