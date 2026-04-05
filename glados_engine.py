@@ -529,19 +529,17 @@ class GladosEngine:
                 sd.play(audio, self.tts.rate)
                 try:
                     sd.wait()
-                except Exception as e:
-                    log.info("TTS playback interrupted: %s (%s)", e, type(e).__name__)
+                except Exception:
+                    log.debug("TTS playback interrupted")
             except Exception as e:
                 log.error("TTS error: %s", e)
                 self.on_error(f"TTS error: {e}")
 
     def stop_speaking(self):
-        log.info("stop_speaking: calling sd.stop()")
         try:
             sd.stop()
-            log.info("stop_speaking: sd.stop() OK")
-        except Exception as e:
-            log.error("stop_speaking: sd.stop() raised %s", e, exc_info=True)
+        except Exception:
+            pass
 
     # --------------------------------------------------------------- worker
     def _worker_loop(self):
