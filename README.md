@@ -1,6 +1,6 @@
 # GLaDOS Voice Chat
 
-A voice-interactive GLaDOS chatbot powered by Google's Gemma 4 E2B multimodal model. Speak to GLaDOS through your microphone and hear her respond in her iconic voice — complete with passive-aggressive commentary and backhanded compliments.
+A voice-interactive GLaDOS chatbot powered by Google's Gemma 4 E2B multimodal model LOCALLY. Speak to GLaDOS through your microphone and hear her respond in her iconic voice — complete with passive-aggressive commentary and backhanded compliments.
 
 ## Features
 
