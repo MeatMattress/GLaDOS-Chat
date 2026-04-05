@@ -16,7 +16,18 @@ A voice-interactive GLaDOS chatbot powered by Google's Gemma 4 E2B multimodal mo
 - **Python 3.10+**
 - **Git**
 - **NVIDIA GPU** with CUDA support (for Gemma 4 inference)
-- ~5 GB disk space for models
+- Disk space for models (see table below)
+
+## Models
+
+On first launch, the app prompts you to choose a model. You can switch models later in Settings > Model.
+
+| Model | VRAM Usage | Download Size | Notes |
+|-------|-----------|---------------|-------|
+| **Gemma 4 E2B** | ~9.5 GB | ~9.6 GB | Smaller, faster responses |
+| **Gemma 4 E4B** | ~14.9 GB | ~14.9 GB | More capable, better quality |
+
+*Tested on an NVIDIA RTX 4090 (24 GB VRAM). Inference will use additional VRAM for KV cache on top of these base numbers.*
 
 ## Quick Start
 
