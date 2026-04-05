@@ -471,7 +471,11 @@ class GladosApp(tk.Tk):
             self.engine.messages.append({"role": "assistant", "content": greeting})
             self._cb_message("assistant", greeting)
             self._cb_status("Speaking")
-            self.engine.speak(greeting)
+            try:
+                self.engine.speak(greeting)
+            except Exception as e:
+                import logging
+                logging.getLogger("glados").error("Greeting speak crashed: %s", e, exc_info=True)
             if self._model_switching:
                 return
             # Calibrate + start listening
@@ -835,9 +839,17 @@ class GladosApp(tk.Tk):
 
     def _skip_speech(self):
         """Stop TTS playback and return to listening."""
+        import logging
+        log = logging.getLogger("glados")
+        log.info("Skip pressed, status=%r", getattr(self, '_current_status', ''))
         if getattr(self, '_current_status', '') != "Speaking":
             return
-        self.engine.stop_speaking()
+        log.info("Calling stop_speaking()")
+        try:
+            self.engine.stop_speaking()
+            log.info("stop_speaking() returned OK")
+        except Exception as e:
+            log.error("stop_speaking() raised: %s", e, exc_info=True)
 
     # ---------------------------------------------------------------- rewind
     def _do_rewind(self, bubble):
@@ -1341,7 +1353,10 @@ class SettingsDialog(tk.Toplevel):
                 app.engine.messages.append({"role": "assistant", "content": greeting})
                 app._cb_message("assistant", greeting)
                 app._cb_status("Speaking")
-                app.engine.speak(greeting)
+                try:
+                    app.engine.speak(greeting)
+                except Exception:
+                    pass
                 app.engine.calibrate()
                 app._cb_status("Listening")
                 # Restart the poll loop
