@@ -135,6 +135,9 @@ class GladosEngine:
         self.stream = None
         self.audio_queue: queue.Queue = queue.Queue()
 
+        # Prevent overlapping TTS playback
+        self._speak_lock = threading.Lock()
+
         # Worker thread for blocking operations
         self._worker_queue: queue.Queue = queue.Queue()
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
@@ -483,24 +486,22 @@ class GladosEngine:
         clean = re.sub(r"[^a-zA-Z0-9\s.,!?'\-:;\"\(\)]", "", clean)
         log.debug("TTS input: %r", clean)
 
-        # Mute the mic while speaking so VAD doesn't capture TTS output
-        was_listening = self.listening
-        if was_listening:
-            self.stop_listening()
-
-        try:
-            audio = self.tts.generate_speech_audio(clean)
-            volume = self.settings["audio"].get("volume", 1.0)
-            if volume != 1.0:
-                audio = audio * volume
-            sd.play(audio, self.tts.rate)
-            sd.wait()
-        except Exception as e:
-            log.error("TTS error: %s", e)
-            self.on_error(f"TTS error: {e}")
-        finally:
+        with self._speak_lock:
+            # Mute the mic while speaking so VAD doesn't capture TTS output
+            was_listening = self.listening
             if was_listening:
-                self.start_listening()
+                self.stop_listening()
+
+            try:
+                audio = self.tts.generate_speech_audio(clean)
+                volume = self.settings["audio"].get("volume", 1.0)
+                if volume != 1.0:
+                    audio = audio * volume
+                sd.play(audio, self.tts.rate)
+                sd.wait()
+            except Exception as e:
+                log.error("TTS error: %s", e)
+                self.on_error(f"TTS error: {e}")
 
     def stop_speaking(self):
         sd.stop()
