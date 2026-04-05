@@ -6,7 +6,8 @@
   "llm": {
     "model": "google/gemma-4-E2B-it",
     "temperature": 0.8,
-    "num_predict": 300
+    "num_predict": 300,
+    "max_history": 20
   },
   "vad": {
     "enabled": true,

@@ -59,6 +59,7 @@ DEFAULTS = {
         "model": "google/gemma-4-E2B-it",
         "temperature": 0.8,
         "num_predict": 300,
+        "max_history": 20,
     },
     "vad": {
         "enabled": True,
@@ -434,6 +435,11 @@ class GladosEngine:
 
         log.info("User input: %r", user_text)
         self.messages.append({"role": "user", "content": user_text})
+
+        # Trim conversation history to max_history exchanges (keep system prompt)
+        max_hist = self.settings["llm"].get("max_history", 20)
+        if max_hist and len(self.messages) > 1 + max_hist * 2:
+            self.messages = self.messages[:1] + self.messages[-(max_hist * 2):]
 
         if self.model is None:
             err = "Model not loaded"
